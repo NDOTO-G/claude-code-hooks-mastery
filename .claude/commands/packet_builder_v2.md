@@ -15,8 +15,8 @@ Your key advantage: between every packet, you review what actually happened — 
 Parse `$ARGUMENTS` into these variables:
 - **PLAN_PATH**: The first argument — path to the implementation plan file.
 - **MODE**: The second argument (optional) — either `plan` or `run`. Default: `run`.
-  - `plan` — Parse the plan, generate the task board, show execution order, then STOP. No code is written.
-  - `run` — Parse the plan, generate the task board, then execute all packets with sub-agents.
+  - `plan` — Parse the plan, analyze the codebase, produce the execution strategy and task board, then STOP. No code is written.
+  - `run` — Parse the plan, analyze the codebase, produce the execution strategy and task board, then execute all packets with sub-agents.
 
 ## Workflow
 
@@ -37,27 +37,78 @@ Follow these steps exactly, in order.
   - **Description**: What needs to be done (the body text under the header).
   - **Files**: Files to create or modify (look for file paths, bullet lists of files).
   - **Criteria**: Acceptance criteria, checklist items, or definition of done (look for `- [ ]` checkboxes, "Criteria:", "Acceptance Criteria:", "Definition of Done:", or numbered requirements). **If criteria are missing or vague, synthesize minimal testable criteria from the packet description** (e.g., "file X exists", "function Y is exported", "tests pass").
-  - **Dependencies**: Which packets must complete first (look for "Depends On:", "Dependencies:", "Blocked By:", or "after Packet N"). **If no dependencies are declared, infer minimal safe ones** using common sense: scaffolding before integration, types/interfaces before implementations, setup before usage. If packets are truly independent, mark them as such.
+  - **Dependencies**: Which packets must complete first (look for "Depends On:", "Dependencies:", "Blocked By:", or "after Packet N"). These will be refined in Step 2 after codebase analysis.
   - **Constraints**: Any scope limits, forbidden changes, or special instructions.
   - **Verification**: Any specific commands to validate this packet (tests, lint, build, compile checks).
   - **Context**: Any code examples, references, patterns, or additional notes.
 
-### Step 2: Create Task Board and Tracking
+### Step 2: Analyze Codebase and Determine Execution Strategy
 
-#### 2a. Capture Baseline
+**This step is what turns a static plan into an informed execution.** Before creating the task board or dispatching any agents, you must understand the current codebase and decide which packets can safely run in parallel and which must be sequential.
+
+#### 2a. Scan Relevant Files and Documentation
+- Read ALL files listed in the plan's "Relevant Files", "Reference", or similar sections.
+- Read any documentation files referenced in the plan.
+- Read existing files that packets will modify — understand their current state, patterns, exports, and conventions.
+- If the plan references a project structure, verify it matches reality.
+
+#### 2b. Map Packet File Overlaps
+For each packet, list every file it will touch (create or modify). Then cross-reference:
+- **File conflicts**: Do any two packets modify the SAME file? If yes, they CANNOT run in parallel — one will overwrite the other's changes or cause merge conflicts.
+- **Directory conflicts**: Do packets create multiple new files in the same directory with related concerns? They may need ordering so the first establishes the pattern.
+
+#### 2c. Identify Implicit Dependencies
+Beyond declared dependencies, look for:
+- **Pattern-setters**: Does one packet establish a convention (file structure, naming, error handling pattern, API shape) that other packets should follow? That packet must go first — it's the template.
+- **Type/interface providers**: Does one packet create types, interfaces, schemas, or shared utilities that others import? It must complete before its consumers.
+- **Integration points**: Does one packet create the wiring (routes, config, registry) that other packets' code plugs into? Determine whether the wiring should come first or last.
+- **Test infrastructure**: Does one packet set up test utilities, fixtures, or helpers that others rely on?
+
+#### 2d. Produce Execution Strategy
+Organize packets into **execution groups** — ordered sets where:
+- Packets WITHIN a group can run in **parallel** (no file overlaps, no implicit dependencies, no declared dependencies on each other).
+- Groups run **sequentially** — Group 2 starts only after all packets in Group 1 are DONE.
+
+Format your strategy as:
+
+```
+## Execution Strategy
+
+### Group 1 (parallel)
+- P1: [name] — [why it's in this group, e.g., "no dependencies, touches only src/models/"]
+- P3: [name] — [why, e.g., "independent scope, no file overlap with P1"]
+
+### Group 2 (parallel)
+- P2: [name] — [why, e.g., "depends on P1's types, no overlap with P4"]
+- P4: [name] — [why, e.g., "depends on P3's utilities, no overlap with P2"]
+
+### Group 3 (sequential — single packet)
+- P5: [name] — [why, e.g., "integration layer, touches files from P1-P4, must see all prior work"]
+
+### Reasoning
+- P1 before P2: P1 creates the User model that P2's service imports.
+- P1 ∥ P3: No shared files. P1 works in src/models/, P3 works in src/utils/. Independent concerns.
+- P5 last: Modifies src/routes/index.ts which imports from all prior packets.
+```
+
+**Be conservative.** When in doubt, make it sequential. Parallel execution saves time but a bad parallel decision causes merge conflicts or inconsistent patterns. It is always safer to serialize than to guess.
+
+### Step 3: Create Task Board and Tracking
+
+#### 3a. Capture Baseline
 - Run `git rev-parse HEAD` to capture the **baseline commit SHA** before any work begins. Store this — you'll need it for diff reviews.
 
-#### 2b. TodoWrite (Live Progress)
+#### 3b. TodoWrite (Live Progress)
 - Use `TodoWrite` to create a task list with one entry per packet. For each packet, create TWO entries:
   - `"P{N}: Build — <packet name>"`
   - `"P{N}: Validate — <packet name>"`
 - This gives the user real-time visibility into both build and validation phases.
 
-#### 2c. Persistent Task Board (Durable Record)
+#### 3c. Persistent Task Board (Durable Record)
 - Create (or update) a task board file at: `specs/packet-runs/<plan-filename>-run.md`
   - Example: if the plan is `specs/my-feature.md`, write to `specs/packet-runs/my-feature-run.md`
   - Create the `specs/packet-runs/` directory if it doesn't exist.
-- The task board file should contain:
+- The task board file MUST include the full Execution Strategy from Step 2. Contents:
 
 ```markdown
 # Packet Run: [plan name]
@@ -67,48 +118,66 @@ Follow these steps exactly, in order.
 **Mode**: [plan|run]
 **Baseline SHA**: [git SHA before execution]
 
-## Execution Order
-[Topological order based on dependencies, noting which can run in parallel]
-1. P1: [name] (no dependencies)
-2. P2: [name] (no dependencies) — parallelizable with P1
-3. P3: [name] (depends on P1, P2)
+## Execution Strategy
+
+### Group 1 (parallel)
+- P1: [name] — [reasoning]
+- P3: [name] — [reasoning]
+
+### Group 2 (parallel)
+- P2: [name] — [reasoning]
+- P4: [name] — [reasoning]
+
+### Group 3 (sequential)
+- P5: [name] — [reasoning]
+
+### Reasoning
+[Full reasoning from Step 2d]
 
 ## Packet Status
 
 ### P1: [name]
 - **Status**: TODO
+- **Group**: 1
 - **Dependencies**: none
 - **Criteria**: [list]
 - **Builder Report**: —
 - **Validator Report**: —
+- **Diff Review**: —
 - **SHA After Build**: —
 
 ### P2: [name]
 - **Status**: TODO
+- **Group**: 2
 - **Dependencies**: P1
 - **Criteria**: [list]
 - **Builder Report**: —
 - **Validator Report**: —
+- **Diff Review**: —
 - **SHA After Build**: —
 ```
 
-#### 2d. Plan Mode Gate
-- **If MODE is `plan`**: Present the task board to the user, including the execution order and any inferred dependencies or synthesized criteria. Then STOP. Do not execute any packets.
-- **If MODE is `run`**: Continue to Step 3.
+#### 3d. Plan Mode Gate
+- **If MODE is `plan`**: Present the task board to the user, including the execution strategy with full reasoning, the execution groups, and any inferred dependencies or synthesized criteria. Then STOP. Do not execute any packets.
+- **If MODE is `run`**: Continue to Step 4.
 
-### Step 3: Execute Packets
+### Step 4: Execute Packets
 
-Process each packet **sequentially** (respecting dependency order). For packets that have no dependencies on each other, you MAY run them in **parallel** by launching multiple Task calls in a single message with `run_in_background: true`.
+Execute packets **group by group** following the Execution Strategy from Step 2.
 
-For EACH packet, follow Steps 3a through 3e:
+- **Within a group**: Launch all packets in parallel using multiple Task calls in a single message with `run_in_background: true`.
+- **Between groups**: Wait for ALL packets in the current group to reach DONE (or BLOCKED/PARTIAL after retries) before starting the next group.
+- **Single-packet groups**: Run normally (no parallelism needed).
 
-#### 3a. Dependency Diff Review (for packets with dependencies)
+For EACH packet within a group, follow Steps 4a through 4e:
+
+#### 4a. Dependency Diff Review (for packets in Group 2+)
 
 **This step is CRITICAL. It is what makes the orchestration adaptive.**
 
-If this packet depends on other packets that have now completed, you MUST do the following BEFORE composing the builder prompt:
+If this packet is in Group 2 or later, you MUST do the following BEFORE composing the builder prompt:
 
-1. **Get the diff.** Run `git diff <dependency_SHA>..<current_HEAD> --stat` and `git diff <dependency_SHA>..<current_HEAD>` to see everything that changed since before the dependency packets ran. Use the SHA captured before the earliest dependency started (or the baseline SHA if this packet depends on the first packet).
+1. **Get the diff.** Run `git diff <baseline_or_dependency_SHA>..<current_HEAD> --stat` and `git diff <baseline_or_dependency_SHA>..<current_HEAD>` to see everything that changed since before the dependency packets ran. Use the SHA captured before the earliest dependency started (or the baseline SHA if this packet depends on Group 1 packets).
 
 2. **Read the builder reports** from all dependency packets. These are stored in the task board file.
 
@@ -120,11 +189,11 @@ If this packet depends on other packets that have now completed, you MUST do the
    - Did any validator flag concerns that are relevant to this packet?
    - Does the packet's original description still make sense given what was actually built, or do the instructions need updating?
 
-5. **Record your findings** as a `## Diff Review` note in the task board under this packet's section. These findings will be incorporated into the builder prompt in Step 3b.
+5. **Record your findings** as a `## Diff Review` note in the task board under this packet's section. These findings will be incorporated into the builder prompt in Step 4b.
 
 **Even if you expect no surprises, do the diff review anyway.** The value is in catching the unexpected.
 
-#### 3b. Dispatch Sonnet Builder Sub-Agent
+#### 4b. Dispatch Sonnet Builder Sub-Agent
 
 - Mark the build task as `in_progress` in TodoWrite.
 - Update the task board file: set this packet's Status to `BUILDING`.
@@ -165,8 +234,8 @@ Your work MUST satisfy ALL of the following:
 ## Additional Context
 {any code examples, architectural notes, patterns, or references from the plan}
 
-## What Was Built Before You (if not the first packet)
-{This section is populated from the Dependency Diff Review in Step 3a.}
+## What Was Built Before You (if not the first group)
+{This section is populated from the Dependency Diff Review in Step 4a.}
 {Summarize what prior packets actually built — not what the plan SAID they would build, but what the orchestrator OBSERVED in the diff and reports.}
 {Call out specifics: file paths created, function signatures, patterns used, anything this packet's work needs to align with.}
 {If the diff revealed anything that changes or clarifies this packet's work, state it explicitly here.}
@@ -207,7 +276,7 @@ Use DONE if all criteria are met. Use PARTIAL if some criteria are met but other
 - When the builder returns, **capture the SHA**: run `git rev-parse HEAD` and store it as this packet's `SHA After Build` in the task board.
 - Mark the build task as `completed` in TodoWrite.
 
-#### 3c. Dispatch Validator Sub-Agent
+#### 4c. Dispatch Validator Sub-Agent
 
 - Mark the validate task as `in_progress` in TodoWrite.
 - Update the task board file: set this packet's Status to `VALIDATING`.
@@ -272,14 +341,14 @@ You MUST end your response with this structured report:
 Use PASS only if ALL criteria are verified. Use FAIL if ANY criterion is not met.
 ```
 
-#### 3d. Orchestrator Decision
+#### 4d. Orchestrator Decision
 
 After the validator returns, YOU (the orchestrator) make the final call. Read the validator's report and decide:
 
 **PASS (validator says all criteria verified):**
 - Update TodoWrite: mark validate task as `completed`.
 - Update the task board: set Status to `DONE`, record both builder and validator reports.
-- Move to the next packet.
+- Move to the next packet (or next group if this was the last packet in the group).
 
 **FAIL (validator found unmet criteria):**
 - **Resume the SAME builder sub-agent** using the `resume` parameter. Compose a targeted fix prompt:
@@ -302,12 +371,12 @@ After the validator returns, YOU (the orchestrator) make the final call. Read th
 - Assess: can you resolve the blocker by dispatching a targeted sub-agent for the missing prerequisite? If it's a simple gap from a prior packet, do so. If it's truly external, mark it and continue.
 - Move to the next packet (other packets may not depend on this one).
 
-#### 3e. Update State
+#### 4e. Update State
 - Update the task board file with all reports and the final status.
 - Ensure TodoWrite reflects the current state.
-- Proceed to the next runnable packet (back to Step 3a).
+- If this was the last packet in the current group, proceed to the next group (back to Step 4a for the first packet in that group).
 
-### Step 4: Final Report
+### Step 5: Final Report
 
 After ALL packets have been processed, update the task board file with final results and present this report:
 
@@ -320,18 +389,22 @@ After ALL packets have been processed, update the task board file with final res
 **Baseline SHA**: [starting SHA]
 **Final SHA**: [ending SHA]
 
-| # | Packet | Build | Validate | Final Status | Retries | Notes |
-|---|--------|-------|----------|--------------|---------|-------|
-| P1 | [name] | DONE | PASS | DONE | 0 | — |
-| P2 | [name] | DONE | FAIL→PASS | DONE | 1 | [what was fixed] |
-| P3 | [name] | PARTIAL | FAIL | PARTIAL | 2 | [what remains unmet] |
-| P4 | [name] | BLOCKED | — | BLOCKED | 0 | [what blocked it] |
+## Execution Strategy Used
+[summary of groups and which packets ran in parallel vs sequential]
+
+| # | Packet | Group | Build | Validate | Final Status | Retries | Notes |
+|---|--------|-------|-------|----------|--------------|---------|-------|
+| P1 | [name] | 1 | DONE | PASS | DONE | 0 | — |
+| P3 | [name] | 1 | DONE | PASS | DONE | 0 | ran parallel with P1 |
+| P2 | [name] | 2 | DONE | FAIL→PASS | DONE | 1 | [what was fixed] |
+| P4 | [name] | 2 | PARTIAL | FAIL | PARTIAL | 2 | [what remains unmet] |
+| P5 | [name] | 3 | BLOCKED | — | BLOCKED | 0 | [what blocked it] |
 
 ### Blockers (if any)
-- P4: [what blocked it and what action is needed]
+- P5: [what blocked it and what action is needed]
 
 ### Incomplete Criteria (if any)
-- P3, criterion 3: [what failed and why after retries]
+- P4, criterion 3: [what failed and why after retries]
 
 ### Files Changed
 - [consolidated list of all files created or modified across all packets]
@@ -340,8 +413,8 @@ After ALL packets have been processed, update the task board file with final res
 - [x] [criterion 1] — P1 (verified by validator)
 - [x] [criterion 2] — P1 (verified by validator)
 - [x] [criterion 3] — P2 (verified after 1 retry)
-- [ ] [criterion 4] — P3 (PARTIAL: reason)
-- [ ] [criterion 5] — P4 (BLOCKED: reason)
+- [ ] [criterion 4] — P4 (PARTIAL: reason)
+- [ ] [criterion 5] — P5 (BLOCKED: reason)
 
 ### Task Board
 Updated task board saved to: `specs/packet-runs/<filename>-run.md`
@@ -350,12 +423,14 @@ Updated task board saved to: `specs/packet-runs/<filename>-run.md`
 ## Rules
 
 1. **You are the orchestrator.** You do NOT write code. You do NOT validate code. All implementation is done by builder sub-agents. All validation is done by validator sub-agents. Your job is to read, reason, compose prompts, and make decisions.
-2. **One packet at a time** by default. Only parallelize packets that have zero dependencies on each other AND are explicitly safe to run concurrently.
-3. **Always diff-review before dependent packets.** When a packet's dependencies complete, review the actual diff and reports BEFORE composing the builder prompt. This is non-negotiable — it is the mechanism that keeps downstream packets aligned with what was actually built upstream.
-4. **Validators are independent.** The validator sub-agent does NOT see the builder's self-report. It receives only the packet criteria, expected files, and verification commands. Its job is to independently confirm the work.
-5. **Resume builders, fresh validators.** When a builder needs to retry, resume it (preserving context). When re-validating, launch a fresh validator (unbiased by prior validation).
-6. **Track everything.** Use TodoWrite for live progress AND the persistent task board file for durable records. Record builder reports, validator reports, and diff review notes.
-7. **Respect scope.** Do not add features, refactor code, or do work beyond what the plan specifies.
-8. **Provide the plan context.** Every builder prompt must include the overall plan objective so the agent understands WHY it is building what it is building.
-9. **Adapt between packets.** The builder prompt template is a starting point. Your primary value is in the `## What Was Built Before You` section and any adjustments you make based on the diff review. Enrich, clarify, and correct the prompt based on what you observe in the evolving codebase.
-10. **Handle blockers gracefully.** A BLOCKED packet is not a failure — it's information. Record it, assess if you can unblock it, and keep the rest of the plan moving.
+2. **Execute by group.** Follow the execution strategy from Step 2. Packets within a group run in parallel. Groups run sequentially. Never start a group before the prior group is fully resolved.
+3. **Always analyze before strategizing.** The execution strategy must be based on actual codebase analysis (file overlaps, implicit dependencies, pattern-setters), not just declared dependencies. Read the relevant files first, then decide.
+4. **Be conservative with parallelism.** When in doubt about whether two packets can safely run in parallel, make them sequential. A wrong parallel decision causes merge conflicts or inconsistent patterns. It is always safer to serialize than to guess.
+5. **Always diff-review before dependent packets.** When a new group starts, review the actual diff and reports from the prior group BEFORE composing any builder prompts. This is non-negotiable — it is the mechanism that keeps downstream packets aligned with what was actually built upstream.
+6. **Validators are independent.** The validator sub-agent does NOT see the builder's self-report. It receives only the packet criteria, expected files, and verification commands. Its job is to independently confirm the work.
+7. **Resume builders, fresh validators.** When a builder needs to retry, resume it (preserving context). When re-validating, launch a fresh validator (unbiased by prior validation).
+8. **Track everything.** Use TodoWrite for live progress AND the persistent task board file for durable records. Record builder reports, validator reports, diff review notes, and execution strategy reasoning.
+9. **Respect scope.** Do not add features, refactor code, or do work beyond what the plan specifies.
+10. **Provide the plan context.** Every builder prompt must include the overall plan objective so the agent understands WHY it is building what it is building.
+11. **Adapt between packets.** The builder prompt template is a starting point. Your primary value is in the `## What Was Built Before You` section and any adjustments you make based on the diff review. Enrich, clarify, and correct the prompt based on what you observe in the evolving codebase.
+12. **Handle blockers gracefully.** A BLOCKED packet is not a failure — it's information. Record it, assess if you can unblock it, and keep the rest of the plan moving.
