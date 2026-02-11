@@ -46,25 +46,66 @@ Follow these steps exactly, in order.
 
 **This step is what turns a static plan into an informed execution.** Before creating the task board or dispatching any agents, you must understand the current codebase and decide which packets can safely run in parallel and which must be sequential.
 
-#### 2a. Scan Relevant Files and Documentation
-- Read ALL files listed in the plan's "Relevant Files", "Reference", or similar sections.
-- Read any documentation files referenced in the plan.
-- Read existing files that packets will modify — understand their current state, patterns, exports, and conventions.
-- If the plan references a project structure, verify it matches reality.
+**Context window discipline:** The codebase may be large. Do NOT read all relevant files yourself — that fills your context with raw source code and leaves less room for reasoning. Instead, dispatch **scout sub-agents** to gather the information you need, then use their condensed reports to make decisions.
 
-#### 2b. Map Packet File Overlaps
-For each packet, list every file it will touch (create or modify). Then cross-reference:
-- **File conflicts**: Do any two packets modify the SAME file? If yes, they CANNOT run in parallel — one will overwrite the other's changes or cause merge conflicts.
-- **Directory conflicts**: Do packets create multiple new files in the same directory with related concerns? They may need ordering so the first establishes the pattern.
+#### 2a. Dispatch Codebase Scouts
+
+Dispatch one or more Sonnet sub-agents to scan the codebase. Organize scouts by the information you need:
+
+**Scout strategy — choose based on plan size:**
+
+- **Small plan (1-3 packets, few files):** A single scout can cover everything.
+- **Medium plan (4-8 packets):** Dispatch 2-3 scouts in parallel — one for docs/reference files, one for existing source files that packets will modify, one for project structure and conventions.
+- **Large plan (9+ packets or many files):** Dispatch scouts by concern area — e.g., one per major directory, one for types/interfaces, one for config/wiring, one for test infrastructure.
+
+Launch scouts using the Task tool:
+  - `subagent_type`: `"general-purpose"`
+  - `model`: `"sonnet"`
+  - `run_in_background`: `true` (launch all scouts in parallel)
+
+**Scout Prompt Template:**
+
+```
+You are a codebase scout. Your job is to read files and return a structured summary. Do NOT modify anything.
+
+## Files to Analyze
+{list of file paths to read}
+
+## What to Report
+For each file, provide:
+1. **Path**: the file path
+2. **Purpose**: what this file does (1 sentence)
+3. **Exports/API surface**: what it exports — function names, class names, type names, with their signatures
+4. **Patterns**: coding conventions observed — naming, error handling, file structure, import style
+5. **Dependencies**: what it imports from other project files (not external packages)
+6. **Relevant details**: anything a developer building new code alongside this would need to know
+
+## Format
+Return a structured report. Be thorough but concise — summarize, don't paste entire files. Your report will be used by an orchestrator to plan execution order, so focus on information that reveals dependencies and patterns.
+```
+
+Wait for all scouts to return before proceeding.
+
+#### 2b. Synthesize Scout Reports and Map File Overlaps
+
+Using the scout reports (NOT by reading the files yourself), build your understanding:
+
+- **Project conventions**: What patterns are established? Naming conventions, file structure, error handling, import style.
+- **File overlap matrix**: For each packet, list every file it will touch (create or modify). Cross-reference:
+  - **File conflicts**: Do any two packets modify the SAME file? If yes, they CANNOT run in parallel — one will overwrite the other's changes or cause merge conflicts.
+  - **Directory conflicts**: Do packets create multiple new files in the same directory with related concerns? They may need ordering so the first establishes the pattern.
+- **API surface map**: What types, functions, and classes exist? What does each packet's target file currently export?
 
 #### 2c. Identify Implicit Dependencies
-Beyond declared dependencies, look for:
+
+Using the synthesized understanding from 2b, look for dependencies beyond what the plan declares:
 - **Pattern-setters**: Does one packet establish a convention (file structure, naming, error handling pattern, API shape) that other packets should follow? That packet must go first — it's the template.
 - **Type/interface providers**: Does one packet create types, interfaces, schemas, or shared utilities that others import? It must complete before its consumers.
 - **Integration points**: Does one packet create the wiring (routes, config, registry) that other packets' code plugs into? Determine whether the wiring should come first or last.
 - **Test infrastructure**: Does one packet set up test utilities, fixtures, or helpers that others rely on?
 
 #### 2d. Produce Execution Strategy
+
 Organize packets into **execution groups** — ordered sets where:
 - Packets WITHIN a group can run in **parallel** (no file overlaps, no implicit dependencies, no declared dependencies on each other).
 - Groups run **sequentially** — Group 2 starts only after all packets in Group 1 are DONE.
@@ -424,7 +465,7 @@ Updated task board saved to: `specs/packet-runs/<filename>-run.md`
 
 1. **You are the orchestrator.** You do NOT write code. You do NOT validate code. All implementation is done by builder sub-agents. All validation is done by validator sub-agents. Your job is to read, reason, compose prompts, and make decisions.
 2. **Execute by group.** Follow the execution strategy from Step 2. Packets within a group run in parallel. Groups run sequentially. Never start a group before the prior group is fully resolved.
-3. **Always analyze before strategizing.** The execution strategy must be based on actual codebase analysis (file overlaps, implicit dependencies, pattern-setters), not just declared dependencies. Read the relevant files first, then decide.
+3. **Always analyze before strategizing.** The execution strategy must be based on actual codebase analysis (file overlaps, implicit dependencies, pattern-setters), not just declared dependencies. Dispatch scouts to read the relevant files, then use their reports to decide.
 4. **Be conservative with parallelism.** When in doubt about whether two packets can safely run in parallel, make them sequential. A wrong parallel decision causes merge conflicts or inconsistent patterns. It is always safer to serialize than to guess.
 5. **Always diff-review before dependent packets.** When a new group starts, review the actual diff and reports from the prior group BEFORE composing any builder prompts. This is non-negotiable — it is the mechanism that keeps downstream packets aligned with what was actually built upstream.
 6. **Validators are independent.** The validator sub-agent does NOT see the builder's self-report. It receives only the packet criteria, expected files, and verification commands. Its job is to independently confirm the work.
@@ -434,3 +475,4 @@ Updated task board saved to: `specs/packet-runs/<filename>-run.md`
 10. **Provide the plan context.** Every builder prompt must include the overall plan objective so the agent understands WHY it is building what it is building.
 11. **Adapt between packets.** The builder prompt template is a starting point. Your primary value is in the `## What Was Built Before You` section and any adjustments you make based on the diff review. Enrich, clarify, and correct the prompt based on what you observe in the evolving codebase.
 12. **Handle blockers gracefully.** A BLOCKED packet is not a failure — it's information. Record it, assess if you can unblock it, and keep the rest of the plan moving.
+13. **Guard your context window.** Your context is for reasoning, not for storing raw source code. Delegate file reading to scout and builder sub-agents. When you need to review work (diff review, validation decisions), read reports and diffs — not entire source files. The moment you start reading large files yourself, you're doing a sub-agent's job.
